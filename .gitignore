@@ -1,0 +1,22 @@
+# caches / build
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ipynb_checkpoints/
+
+# secrets / env
+.env
+*.key
+
+# logs / checkpoints / models (do not commit)
+logs/
+logs-*/
+*.log
+*.bin
+*.pt
+*.safetensors
+wandb/
+
+# local scratch
+.DS_Store

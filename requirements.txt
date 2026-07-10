@@ -1,0 +1,14 @@
+torch
+transformers>=4.52.4
+huggingface_hub
+seqeval
+tqdm
+loguru
+sentencepiece==0.1.98
+protobuf<=3.20.0
+scipy==1.10.1
+numpy<2.0.0
+python-dotenv>=1.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+gradio>=5.0

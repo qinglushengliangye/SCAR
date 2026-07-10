@@ -1,0 +1,103 @@
+# ============================================================
+# 级联软融合增强推理配置 - Wiki-ZSL 数据集
+# 创新点1：双编码器粗细粒度软融合，不剪枝，只增强
+# ============================================================
+
+# Learning Rate
+lr_encoder: 2e-6
+lr_others: 2e-5
+weight_decay_encoder: 0.0
+weight_decay_other: 0.0
+
+# Training Parameters
+num_steps: 20000
+warmup_ratio: 0.03
+train_batch_size: 24
+eval_every: 300
+gradient_accumulation: null
+eval_batch_size: 48
+num_layers_freeze: null
+early_stopping_patience: 12
+early_stopping_delta: 0.0
+threshold_search_metric: "macro_f1"
+max_saves: 1
+
+# Model Configuration
+max_width: 12
+model_name: /root/autodl-tmp/models/deberta-v3-large
+fine_tune: true
+subtoken_pooling: first
+hidden_size: 768
+scorer: "dot"
+rel_mode: marker
+span_marker_mode: markerv1
+refine_prompt: false
+refine_relation: false
+ffn_mul: 4
+dropout: 0.4
+scheduler: "cosine_with_warmup"
+loss_func: "binary_cross_entropy_loss"
+alpha: 0.3
+gamma: 3
+label_embed_strategy: "both"
+
+# Coreference Resolution
+coref_classifier: false
+coref_loss_weight: 10.0
+coreference_label: "SELF"
+
+# Entity markers
+entity_start_token: "[E]"
+entity_end_token: "[/E]"
+
+# Directory Paths
+dataset_name: "wiki_zsl"
+root_dir: /root/autodl-tmp/logs-m=10/cascade_wikizsl
+train_data: "data/wiki_zsl_all.jsonl"
+
+# Pretrained GLiREL model as starting point
+prev_path: /root/autodl-tmp/models/glirel-large-v0
+
+# Training Specifics
+size_sup: -1
+num_train_rel_types: 25
+num_unseen_rel_types: 10
+top_k: 1
+random_drop: true
+max_len: 512
+eval_threshold:
+  - 0.01
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.5
+  - 0.6
+max_entity_pair_distance: null
+fixed_relation_types: true
+
+name: "large_cascade_v2_m10"
+
+# ============================================================
+# 创新点1：双编码器粗细粒度软融合增强
+# ============================================================
+
+# 启用级联软融合
+cascade_retrieval: true
+
+# 粗粒度检索向量维度（轻量）
+retrieval_dim: 128
+
+# 融合权重初始值（0=训练开始完全不影响主模型）
+fusion_alpha_init: 0.0
+
+# 融合权重最大值（课程学习最终目标）- 降低到0.05减少粗粒度分支影响
+fusion_alpha_max: 0.05
+
+# 融合权重从0增长到max所需步数（课程学习预热）- 延长到3000步
+cascade_warmup_steps: 3000
+
+# 辅助对比损失权重 - 大幅降低防止干扰主损失
+retrieval_loss_weight: 0.01
+
+# 实验1随机种子
+seed: 11223344
