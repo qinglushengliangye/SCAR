@@ -1,23 +1,13 @@
-"""SCAR training script -- supports TWO evaluation protocols.
+"""SCAR training script -- PROTOCOL A (standard ZSRE, paper main table).
 
-PROTOCOL A (standard, paper main table): if `num_dev_rel_types` is NOT set in the
-config, the relation-disjoint held-out set serves as BOTH dev and test (threshold
-+ checkpoint selected on the reported set), following ZS-BERT / TMC-BERT / GLiREL.
-The unmodified original of this protocol is kept as train_original.py.
+This is the original, unmodified training script. The relation-disjoint held-out
+set is used as BOTH dev and test: the decision threshold and the best checkpoint
+are selected on the same held-out relation set that is then reported. This is the
+standard ZSRE protocol (ZS-BERT / TMC-BERT / GLiREL) and reproduces the paper's
+main table (m in {5, 10, 15}).
 
-PROTOCOL B (leakage-free dev-split, rebuttal experiment E1): if `num_dev_rel_types`
-IS set, the held-out relations are further split into a DISJOINT dev and test set
-(train / dev / test relation sets are mutually disjoint). Threshold + checkpoint
-are selected ONLY on dev; test is scored once at the dev-selected threshold and
-written to <log_dir>/dev_test_results.json. Test never influences selection.
-
-This version also fixes two issues present in train_original.py:
-  (i)  the selection metric is re-bound to the config's `threshold_search_metric`
-       (macro_f1) after from_pretrained, which otherwise silently defaults to
-       micro_f1 because the pretrained glirel_config.json omits the field;
-  (ii) relation splits are deterministic per seed (`get_unique_relations` sorts
-       before shuffling), so a given seed reproduces the same split and the three
-       methods on a split are paired.
+For the leakage-free protocol (an independent dev relation set for threshold /
+checkpoint selection), use train.py with `num_dev_rel_types` set (PROTOCOL B).
 See README ("Two evaluation protocols").
 """
 import argparse
@@ -130,12 +120,7 @@ def get_unique_relations(data):
     for item in data:
         for r in item['relations']:
             unique_rel_types.append(r["relation_text"])
-    # sorted() (not list(set())) so the pre-shuffle ordering is deterministic
-    # across processes: list(set(strings)) order depends on PYTHONHASHSEED, which
-    # made `random.seed(seed); shuffle` produce a DIFFERENT split every run for the
-    # same seed. Sorting makes a given seed reproduce the same split (and lets the
-    # three methods on exp_k share an identical, paired train/dev/test split).
-    unique_rel_types = sorted(set(unique_rel_types))
+    unique_rel_types = list(set(unique_rel_types))
     return unique_rel_types
 
 
@@ -254,59 +239,6 @@ def dirty_split_data_by_relation_type(data, num_unseen_rel_types, max_test_size)
     return train_data, test_data
 
 
-def split_train_dev_test_by_relation_type(data, num_unseen_rel_types, num_dev_rel_types, seed=None):
-    """Relation-disjoint 3-way split (rebuttal E1: independent dev selection).
-
-    Produces train / dev / test partitions whose relation-type sets are mutually
-    disjoint. ``test`` holds the first ``num_unseen_rel_types`` shuffled relations,
-    ``dev`` the next ``num_dev_rel_types``, and ``train`` the remainder. Sentences
-    whose relations span more than one partition are skipped (as in the original
-    2-way splitter). This lets threshold + checkpoint selection happen on ``dev``
-    while ``test`` stays untouched until final reporting.
-    """
-    unique_relations = get_unique_relations(data)
-    if seed is None:
-        seed = random.randint(0, 1000)
-
-    logger.info("Running 3-way (train/dev/test) relation-disjoint split...")
-    start = time.time()
-    count = 0
-    while True:
-        random.seed(seed)
-        random.shuffle(unique_relations)
-        test_relation_types = set(unique_relations[:num_unseen_rel_types])
-        dev_relation_types = set(unique_relations[num_unseen_rel_types:num_unseen_rel_types + num_dev_rel_types])
-        train_relation_types = set(unique_relations[num_unseen_rel_types + num_dev_rel_types:])
-
-        train_data, dev_data, test_data, skipped = [], [], [], []
-        for item in data:
-            relation_types = {r["relation_text"] for r in item['relations']}
-            if relation_types.issubset(test_relation_types):
-                test_data.append(item)
-            elif relation_types.issubset(dev_relation_types):
-                dev_data.append(item)
-            elif relation_types.issubset(train_relation_types):
-                train_data.append(item)
-            else:
-                skipped.append(item)
-
-        ok_test = len(get_unique_relations(test_data)) == num_unseen_rel_types
-        ok_dev = len(get_unique_relations(dev_data)) == num_dev_rel_types
-        if ok_test and ok_dev:
-            break
-        seed = random.randint(0, 1000)
-        count += 1
-        if count % 50 == 0:
-            logger.info(f"3-way split attempt {count} | seed {seed}")
-
-    logger.info(
-        f"3-way split on seed {seed} | skipped {len(skipped)} mixed-relation items | "
-        f"train={len(train_data)} dev={len(dev_data)} test={len(test_data)}"
-    )
-    logger.info(f"3-way splitting took {time.time() - start} seconds")
-    return train_data, dev_data, test_data
-
-
 def freeze_n_layers(model, N):
     """
     Freezes or unfreezes the first n layers of the model.
@@ -395,8 +327,7 @@ class EarlyStopping:
 # train function
 def train(model, optimizer, train_data, config, train_rel_types, eval_rel_types, eval_data=None, 
           num_steps=1000, eval_every=100, top_k=1, log_dir=None,
-          wandb_log=False, wandb_sweep=False, warmup_ratio=0.1, train_batch_size=8, device='cuda', use_amp=True,
-          test_data=None, test_rel_types=None):
+          wandb_log=False, wandb_sweep=False, warmup_ratio=0.1, train_batch_size=8, device='cuda', use_amp=True):
 
     # EarlyStopping
     max_saves = config.max_saves if hasattr(config, 'max_saves') else 3
@@ -406,10 +337,6 @@ def train(model, optimizer, train_data, config, train_rel_types, eval_rel_types,
     delta = delta if delta is not None else 0.0
     early_stopping = EarlyStopping(patience=patience, delta=delta, max_saves=max_saves)
 
-    # Rebuttal E1: track the TEST metric at the step where DEV selection is best.
-    # Selection (threshold + checkpoint) uses eval_data (=dev); test_data is only
-    # scored at the dev-selected threshold and never influences selection.
-    dev_test_tracker = {'best_dev_f1': float('-inf'), 'test_at_best_dev': None}
 
     if wandb_log:
         # Start a W&B Run with wandb.init
@@ -595,41 +522,6 @@ def train(model, optimizer, train_data, config, train_rel_types, eval_rel_types,
                     macro_f1, macro_precision, macro_recall = metric_dict['macro_f1'], metric_dict['macro_precision'], metric_dict['macro_recall']
                     logger.info(f"Best threshold for eval: {metric_dict['best_threshold']}")
 
-                    # Rebuttal E1: score the untouched TEST relations at the
-                    # threshold selected on DEV (single value, no re-search),
-                    # and remember it whenever DEV F1 reaches a new best.
-                    if test_data is not None:
-                        dev_thr = metric_dict['best_threshold']
-                        _, test_metric_dict = model.evaluate(
-                            test_data,
-                            flat_ner=True,
-                            threshold=[dev_thr],
-                            batch_size=config.eval_batch_size,
-                            relation_types=test_rel_types if config.fixed_relation_types else [],
-                            top_k=top_k,
-                            dataset_name=config.dataset_name,
-                        )
-                        sel_metric = metric_dict[model.threshold_search_metric]
-                        logger.info(
-                            f"[DEV->TEST] step={step} dev_macro_f1={macro_f1:.4f} "
-                            f"dev_threshold={dev_thr} "
-                            f"test_macro_f1@dev_thr={test_metric_dict['macro_f1']:.4f}"
-                        )
-                        if sel_metric > dev_test_tracker['best_dev_f1']:
-                            dev_test_tracker['best_dev_f1'] = sel_metric
-                            dev_test_tracker['test_at_best_dev'] = {
-                                'step': step,
-                                'dev_threshold': dev_thr,
-                                'dev_macro_f1': macro_f1,
-                                'test_macro_f1': test_metric_dict['macro_f1'],
-                                'test_macro_precision': test_metric_dict['macro_precision'],
-                                'test_macro_recall': test_metric_dict['macro_recall'],
-                                'test_micro_f1': test_metric_dict['micro_f1'],
-                            }
-                            if log_dir is not None:
-                                with open(os.path.join(log_dir, 'dev_test_results.json'), 'w') as f:
-                                    json.dump(dev_test_tracker['test_at_best_dev'], f, indent=2)
-
                     wandb_payload.update({
                                 "epoch": step // len(train_loader),
                                 "eval_f1_micro": micro_f1,
@@ -738,7 +630,6 @@ def main(args):
 
 
     # train / eval split
-    test_data = None  # rebuttal E1: populated only when num_dev_rel_types is set
 
     if eval_data is None:
         if args.skip_splitting:
@@ -766,12 +657,7 @@ def main(args):
                 data = sorted(data, key=lambda x: len(x['relations']))
                 train_data = data
             else:
-                num_dev = getattr(config, 'num_dev_rel_types', None)
-                if num_dev:
-                    train_data, eval_data, test_data = split_train_dev_test_by_relation_type(
-                        data, config.num_unseen_rel_types, num_dev, seed=seed)
-                else:
-                    train_data, eval_data = split_data_by_relation_type(data, config.num_unseen_rel_types, seed=seed)
+                train_data, eval_data = split_data_by_relation_type(data, config.num_unseen_rel_types, seed=seed)
         else:
             raise ValueError("No eval data provided and config.num_unseen_rel_types is None")
     else:
@@ -803,20 +689,12 @@ def main(args):
 
     train_rel_types = get_unique_relations(train_data)
     eval_rel_types = get_unique_relations(eval_data) if eval_data is not None else None
-    test_rel_types = get_unique_relations(test_data) if test_data is not None else None
     logger.info(f"Num Train relation types: {len(train_rel_types)}")
     logger.info(f"Number of train samples: {len(train_data)}")
     if eval_data is not None:
         logger.info(f"Intersection: {set(train_rel_types) & set(eval_rel_types)}")
         logger.info(f"Num Eval relation types: {len(eval_rel_types)}")
         logger.info(f"Number of eval samples: {len(eval_data)}")
-    if test_data is not None:
-        # E1 sanity: dev (eval) and test relation sets must be disjoint, and both
-        # disjoint from train. These logged intersections should all be empty.
-        logger.info(f"[E1] dev/test rel intersection: {set(eval_rel_types) & set(test_rel_types)}")
-        logger.info(f"[E1] train/test rel intersection: {set(train_rel_types) & set(test_rel_types)}")
-        logger.info(f"[E1] Num Test relation types: {len(test_rel_types)}")
-        logger.info(f"[E1] Number of test samples: {len(test_data)}")
 
 
     # Load model
@@ -827,13 +705,6 @@ def main(args):
         model.base_config = config
     else:
         model = GLiREL(config)
-
-    # The pretrained glirel_config.json may omit threshold_search_metric, in which
-    # case __init__ silently defaults it to 'micro_f1'. Re-bind it to the run
-    # config so threshold search, early stopping, and dev->test tracking all use
-    # the metric we actually report (macro_f1).
-    model.threshold_search_metric = getattr(config, 'threshold_search_metric', 'micro_f1')
-    logger.info(f"[selection] threshold_search_metric = {model.threshold_search_metric}")
 
     # ── 创新点2：加载预训练模型后，按当前 config 挂载有监督对比学习模块 ─────
     # 预训练 checkpoint 的 config 可能不含 supcon_enabled 字段，此处按最新 config 挂载
@@ -990,7 +861,7 @@ def main(args):
         train(model, optimizer, train_data=train_data, config=config, train_rel_types=train_rel_types, eval_rel_types=eval_rel_types, eval_data=eval_data,
             num_steps=config.num_steps, eval_every=config.eval_every, top_k=config.top_k,
             log_dir=config.log_dir, wandb_log=args.wandb_log, wandb_sweep=args.wandb_sweep, warmup_ratio=config.warmup_ratio, train_batch_size=config.train_batch_size,
-            device=device, use_amp=use_amp, test_data=test_data, test_rel_types=test_rel_types)
+            device=device, use_amp=use_amp)
     except EarlyStoppingException:
         logger.info("Early stopping triggered.")
 

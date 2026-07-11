@@ -16,15 +16,42 @@ branches:
 
 ```
 glirel/                         model + modules (CCA, ISCL, evaluator, ...)
-train.py                        training / evaluation entry point
-configs/, configs_m/            main + m in {5,10,15} experiment configs
-configs/e1_devsplit/            independent dev-split protocol configs (see below)
+train_original.py               PROTOCOL A entry point (standard ZSRE, paper main table)
+train.py                        PROTOCOL A/B entry point (adds leakage-free dev-split)
+configs/                        main experiment configs (Baseline / CCA / SCAR, m=15)
+configs/e1_devsplit/            PROTOCOL B: independent dev-split configs
 configs/e2_controlled_lr/       controlled learning-rate configs
 scripts/                        config generators + multi-GPU launchers + collectors
 analysis/compute_calibration.py ECE / Brier / NLL diagnostics
 data/wiki_zsl_all.jsonl         preprocessed Wiki-ZSL (113 relation types)
 data/few_rel_all.jsonl          preprocessed FewRel (80 relation types)
 ```
+
+## Two evaluation protocols
+
+**Protocol A — standard ZSRE (paper main table).** The relation-disjoint held-out
+set is used as *both* dev and test: the decision threshold and the best checkpoint
+are selected on the same held-out relation set that is then reported. This is the
+field-standard protocol (ZS-BERT / TMC-BERT / GLiREL). Reproduced by
+`train_original.py` (unmodified), or by `train.py` when `num_dev_rel_types` is
+absent from the config.
+
+**Protocol B — leakage-free dev-split (rebuttal experiment E1).** The held-out
+relations are further partitioned into a *disjoint* dev and test set (train / dev /
+test relation sets are mutually disjoint). Threshold and checkpoint are selected
+*only* on dev; the test relations are scored once, at the dev-selected threshold,
+and never influence selection. Enabled by setting `num_dev_rel_types` (see
+`configs/e1_devsplit/`); the per-run dev-selected test score is written to
+`<log_dir>/dev_test_results.json`.
+
+Protocol B is a stricter, self-contained comparison used to verify that the SCAR /
+CCA gains are not an artifact of selecting the threshold on the reported test
+relations; its absolute numbers are lower than Protocol A (independent selection +
+fewer training relations) and are not directly comparable to the main table.
+
+`train.py` additionally re-binds the selection metric to the config's
+`threshold_search_metric` (macro_f1) and makes relation splits deterministic per
+seed; `train_original.py` is kept verbatim for exact reproduction of the main table.
 
 ## Setup
 
@@ -47,10 +74,13 @@ Relation splits are seeded and deterministic (`get_unique_relations` sorts befor
 shuffling), so a given seed reproduces the same train/dev/test relation partition,
 and the three methods on the same split are paired.
 
-Single run:
+Single run (Protocol A, standard):
 
 ```bash
-python3 train.py --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar_wikizsl
+# exact main-table reproduction (unmodified script):
+python3 train_original.py --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar_wikizsl
+# equivalent via the dual-protocol script (num_dev_rel_types absent => Protocol A):
+python3 train.py          --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar_wikizsl
 ```
 
 - **Baseline** = `*_repro*` configs, **CCA** = `*_cascade*`, **SCAR** = `*_innovation2*`.
