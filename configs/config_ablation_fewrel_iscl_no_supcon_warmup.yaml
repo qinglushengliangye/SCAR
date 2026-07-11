@@ -1,6 +1,5 @@
 # ============================================================
 # ISCL 消融实验：去除 SupCon 预热 - FewRel 数据集
-# 基于 config_few_rel_innovation2_exp1.yaml (与 innovation2_exp4 同 seed=11223344)
 # 唯一改动：supcon_warmup_steps: 0
 # ============================================================
 
@@ -104,5 +103,3 @@ supcon_loss_weight: 0.05
 # 消融：去除 SupCon 预热（从完整 loss_weight 开始训练）
 # ============================================================
 supcon_warmup_steps: 0
-
-seed: 11222333

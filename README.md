@@ -70,9 +70,14 @@ spans and relation annotations). Preprocessing scripts: `data/process_wiki_zsl.p
 
 ## Reproducing the experiments
 
-Relation splits are seeded and deterministic (`get_unique_relations` sorts before
-shuffling), so a given seed reproduces the same train/dev/test relation partition,
-and the three methods on the same split are paired.
+The top-level configs (`configs/config_{wiki_zsl,few_rel}_{repro,cascade,innovation2}.yaml`
+= Baseline / CCA / SCAR, and the `config_ablation_*` files) are **generic templates
+with no fixed `seed`**: each run draws a fresh random relation split. To reproduce a
+specific split, add `seed: <int>` to the config. Splitting is deterministic per seed
+(`get_unique_relations` sorts before shuffling), so a given seed reproduces the same
+train/dev/test partition and pairs the three methods on that split. The exact rebuttal
+runs use pinned seeds in `configs/e1_devsplit/` and `configs/e2_controlled_lr/`
+(exp1/2/3 -> seed 1/2/3).
 
 Single run (Protocol A, standard):
 

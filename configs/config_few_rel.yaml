@@ -67,5 +67,3 @@ fixed_relation_types: true  # for eval: only use the given list of relation type
 
 
 name: "large"
-
-

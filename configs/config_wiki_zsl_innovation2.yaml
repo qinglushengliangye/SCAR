@@ -102,6 +102,3 @@ supcon_temperature: 0.1
 supcon_hard_neg_beta: 1.0
 supcon_warmup_steps: 1500
 supcon_loss_weight: 0.05
-
-# 主实验随机种子（与 split2 的 11223344 不同，用于两组独立数据划分验证稳定性）
-seed: 20260421
