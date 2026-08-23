@@ -164,15 +164,6 @@ data/                            preprocessed Wiki-ZSL and FewRel
 
 ---
 
-## Notes
-
-- ISCL is training-only and removed at inference; only CCA's additive fusion
-  persists (~0.1% parameters, ~2% throughput overhead).
-- Checkpoint selection and threshold search both use **Macro-F1**
-  (`threshold_search_metric`), matching the metric reported in the paper.
-- This work builds on the public GLiREL joint-encoding framework, cited in the
-  paper.
-
 ## Citation
 
 ```bibtex
