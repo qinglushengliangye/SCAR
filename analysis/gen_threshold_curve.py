@@ -1,72 +1,62 @@
-"""Generate threshold vs F1 sensitivity curve from cached predictions."""
-import sys
-sys.path.insert(0, '/root/GLiREL')
+"""Regenerate the threshold-vs-F1 sensitivity figure.
 
+Reads the cached full-vocabulary threshold sweep stored in stats_*.json, so the
+figure can be rebuilt without re-running inference.
+"""
 import json
 import os
-import pickle
 
 import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
 
-OUTPUT_DIR = '/root/GLiREL/paper/figures'
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CACHED = os.path.join(_HERE, "cached")
+FIG_DIR = _CACHED if os.path.isdir(_CACHED) else os.path.join(_HERE, "..", "paper", "figures")
+OUT_DIR = os.path.join(_HERE, "..", "paper", "figures")
+
+METHODS = [
+    ("Baseline", "stats_baseline.json", "#e74c3c"),
+    ("CCA", "stats_cca.json", "#3498db"),
+    ("SCAR", "stats_cca_iscl.json", "#2ecc71"),
+]
 
 plt.rcParams.update({
-    'font.family': 'serif',
-    'font.serif': ['Times New Roman', 'DejaVu Serif'],
-    'font.size': 9,
-    'axes.labelsize': 10,
-    'axes.titlesize': 11,
-    'figure.dpi': 300,
-    'savefig.dpi': 300,
-    'savefig.bbox': 'tight',
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "DejaVu Serif"],
+    "font.size": 9,
+    "axes.labelsize": 10,
+    "axes.titlesize": 11,
+    "figure.dpi": 300,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
 })
 
-cache_path = f'{OUTPUT_DIR}/analysis_cache.pkl'
-with open(cache_path, 'rb') as f:
-    cache = pickle.load(f)
 
-results_dict = cache['results_dict']
-method_names = ['Baseline', 'CCA', 'CCA+ISCL']
-colors = ['#e74c3c', '#3498db', '#2ecc71']
+def main():
+    fig, ax = plt.subplots(figsize=(4.5, 3))
+    for label, fname, color in METHODS:
+        curve = json.load(open(os.path.join(FIG_DIR, fname)))["thresh_f1"]
+        pts = sorted((float(t), f1) for t, f1 in curve.items())
+        xs = [t for t, _ in pts]
+        ys = [f1 for _, f1 in pts]
+        ax.plot(xs, ys, color=color, linewidth=1.5, label=label)
+        best_t, best_f1 = max(pts, key=lambda tf: tf[1])
+        ax.plot([best_t], [best_f1], marker="o", ms=3.5, color=color)
+        print("%-9s best F1 %5.2f at t=%.2f" % (label, best_f1, best_t))
 
-thresholds = np.arange(0.01, 0.95, 0.02)
+    ax.set_xlabel("Decision Threshold")
+    ax.set_ylabel("F1 (%)")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False, loc="upper left")
+    ax.grid(alpha=0.25, linewidth=0.5)
 
-fig, ax = plt.subplots(figsize=(4.5, 3))
+    out = os.path.join(OUT_DIR, "threshold_sensitivity.pdf")
+    fig.savefig(out)
+    print("wrote", out)
 
-for idx, (method, results) in enumerate(results_dict.items()):
-    preds = results['predictions']
-    golds = results['gold_triplets']
-    total_gold = len(golds)
 
-    f1_values = []
-    for thresh in thresholds:
-        tp = sum(1 for p in preds if p['is_tp'] and p['prob'] >= thresh)
-        fp = sum(1 for p in preds if not p['is_tp'] and p['prob'] >= thresh and p['gold_label_id'] > 0)
-        fn = total_gold - tp
-
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        f1_values.append(f1 * 100)
-
-    ax.plot(thresholds, f1_values, color=colors[idx], linewidth=1.5, label=method_names[idx])
-
-    best_idx = np.argmax(f1_values)
-    ax.scatter(thresholds[best_idx], f1_values[best_idx], color=colors[idx], s=30, zorder=5)
-
-ax.set_xlabel('Decision Threshold')
-ax.set_ylabel('F1 (%)')
-ax.set_title('Threshold Sensitivity', fontweight='bold')
-ax.legend(fontsize=8)
-ax.grid(alpha=0.3)
-ax.set_xlim(0, 1)
-
-plt.tight_layout()
-path = os.path.join(OUTPUT_DIR, 'threshold_sensitivity.pdf')
-plt.savefig(path)
-plt.savefig(path.replace('.pdf', '.png'))
-plt.close()
-print(f"Saved to {path}")
+if __name__ == "__main__":
+    main()

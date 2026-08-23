@@ -40,7 +40,7 @@ PALETTE = {
 METHOD_NAMES = {
     "baseline": "Baseline",
     "cca": "CCA",
-    "cca_iscl": "CCA + ISCL",
+    "cca_iscl": "SCAR",
 }
 
 OUTPUT_DIR = '/root/GLiREL/paper/figures'

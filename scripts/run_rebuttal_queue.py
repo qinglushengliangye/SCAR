@@ -39,6 +39,7 @@ def build_jobs():
         for e in EXPS:
             jobs.append({
                 "name": f"E1-{method}-{e}",
+                "entry": "train_leakage_free.py",
                 "config": f"configs/e1_devsplit/config_wiki_zsl_{method}_dev_{e}.yaml",
                 "log_dir": f"/root/autodl-tmp/logs-e1/{method}_wikizsl/{e}",
             })
@@ -71,7 +72,7 @@ def launch(job, gpu):
     # start_new_session=True (setsid) so a session/SIGHUP event on the launcher
     # does not take the training children down with it.
     proc = subprocess.Popen(
-        ["python3", "train.py", "--config", job["config"], "--log_dir", job["log_dir"]],
+        ["python3", job.get("entry", "train.py"), "--config", job["config"], "--log_dir", job["log_dir"]],
         cwd=REPO, env=env, stdout=logf, stderr=subprocess.STDOUT,
         start_new_session=True,
     )

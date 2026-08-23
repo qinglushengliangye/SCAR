@@ -1,137 +1,177 @@
-# SCAR: Stabilized Cascade and Alignment for Robust Joint-Encoding ZSRE
+# SCAR: Distributional Stabilization for Zero-Shot Relation Extraction
 
-Code and data for *"Distributional Stabilization for Zero-Shot Relation
-Extraction"*, to appear at **EMNLP 2026 (Main Conference)**.
+Code and data for **"Distributional Stabilization for Zero-Shot Relation
+Extraction"**, EMNLP 2026 (Main Conference).
 
-SCAR augments a joint-encoding ZSRE baseline (GLiREL-style, DeBERTa-v3-large)
-with two lightweight, stabilized auxiliary branches:
+---
 
-- **CCA (Coarse-to-Fine Cascade Augmentation)** — a gradient-isolated dual-encoder
-  scoring stream with per-sample Z-score normalization, added to the fine-grained
-  score. See `glirel/modules/dual_encoder_retriever.py`.
-- **ISCL (Interactive Supervised Contrastive Learning)** — a training-only,
-  label-aware supervised contrastive branch (removed at inference). See
-  `glirel/modules/supcon.py`.
+## What the paper is about
 
-## Repository layout
+Joint-encoding zero-shot relation extraction (ZSRE) scores every candidate
+relation label in a single Transformer forward pass, which makes it both
+accurate and fast (156–176 sent/s, versus 1.4–27.8 for a representative
+pairwise method). Its robustness, however, has only ever been tested on the
+standard protocol, which shows the model just 5–15 candidate relations at a
+time.
 
-```
-glirel/                         model + modules (CCA, ISCL, evaluator, ...)
-train_original.py               PROTOCOL A entry point (standard ZSRE, paper main table)
-train.py                        PROTOCOL A/B entry point (adds leakage-free dev-split)
-configs/                        main experiment configs (Baseline / CCA / SCAR, m=15)
-configs/e1_devsplit/            PROTOCOL B: independent dev-split configs
-configs/e2_controlled_lr/       controlled learning-rate configs
-scripts/                        config generators + multi-GPU launchers + collectors
-analysis/compute_calibration.py ECE / Brier / NLL diagnostics
-analysis/e1_oracle_threshold.py dev-selected vs. test-oracle threshold check
-analysis/gen_per_rel_table.py   full 113-relation recall breakdown (appendix table)
-analysis/gen_failure_analysis.py  when/why SCAR regresses (type-signature families)
-data/wiki_zsl_all.jsonl         preprocessed Wiki-ZSL (113 relation types)
-data/few_rel_all.jsonl          preprocessed FewRel (80 relation types)
-```
+Under a **controlled full-vocabulary diagnostic** — scoring against all 113
+Wiki-ZSL relations at once — two failure modes appear:
 
-## Two evaluation protocols
+| Failure mode | Symptom | Root cause |
+| --- | --- | --- |
+| **Recall collapse** | 35 of 113 relation types receive *zero* recall (24% of gold instances) | Unnormalized dot-product scores are not scale-invariant: magnitudes learned against ≤25 candidates do not transfer to 113 |
+| **Confidence ambiguity** | Gold and negative scores overlap (gap 0.30); the best single threshold yields only 18.2% Macro-F1 | Per-instance BCE never constrains the global geometry of the representation space |
 
-**Protocol A — standard ZSRE (paper main table).** The relation-disjoint held-out
-set is used as *both* dev and test: the decision threshold and the best checkpoint
-are selected on the same held-out relation set that is then reported. This is the
-field-standard protocol (ZS-BERT / TMC-BERT / GLiREL). Reproduced by
-`train_original.py` (unmodified), or by `train.py` when `num_dev_rel_types` is
-absent from the config.
+The two are **independent**: fixing the scores alone recovers recall but leaves
+best-threshold F1 unchanged at 18.2%. Each needs its own mechanism.
 
-**Protocol B — leakage-free dev-split (rebuttal experiment E1).** The held-out
-relations are further partitioned into a *disjoint* dev and test set (train / dev /
-test relation sets are mutually disjoint). Threshold and checkpoint are selected
-*only* on dev; the test relations are scored once, at the dev-selected threshold,
-and never influence selection. Enabled by setting `num_dev_rel_types` (see
-`configs/e1_devsplit/`); the per-run dev-selected test score is written to
-`<log_dir>/dev_test_results.json`.
+**SCAR** (Stabilized Cascade and Alignment for Robust joint-encoding ZSRE)
+keeps the baseline pathway intact and attaches two lightweight branches:
 
-Protocol B is a stricter, self-contained comparison used to verify that the SCAR /
-CCA gains are not an artifact of selecting the threshold on the reported test
-relations; its absolute numbers are lower than Protocol A (independent selection +
-fewer training relations) and are not directly comparable to the main table.
+- **CCA — Coarse-to-Fine Cascade Augmentation** (`glirel/modules/dual_encoder_retriever.py`)
+  A gradient-isolated dual-encoder stream whose per-sample Z-score normalization
+  turns absolute scores into within-candidate-set rankings, restoring
+  cross-relation comparability.
+- **ISCL — Interactive Supervised Contrastive Learning** (`glirel/modules/supcon.py`)
+  A training-only contrastive branch with label-aware cross-attention anchors and
+  label-embedding hard negatives, which reshapes the representation geometry so
+  gold and negative scores separate. Removed at inference.
 
-`train.py` additionally re-binds the selection metric to the config's
-`threshold_search_metric` (macro_f1) and makes relation splits deterministic per
-seed; `train_original.py` is kept verbatim for exact reproduction of the main table.
+Naive integration of either branch is unstable (up to −23.3 pp), so both are
+stabilized with gradient isolation, Z-score normalization and curriculum warmup.
+
+### Headline results
+
+| | Baseline | CCA | SCAR |
+| --- | --- | --- | --- |
+| Wiki-ZSL m=15 Macro-F1 | 75.88 | 82.40 | **83.04** |
+| Zero-recall types (of 113) | 35 | 22 | **1** |
+| Gold–negative gap | 0.296 | 0.370 | **0.560** |
+| Best-threshold Macro-F1 (full vocab) | 18.2 | 18.2 | **42.9** |
+| Leakage-free split, test Macro-F1 | 53.5 | 64.0 | **64.5** |
+
+Across 30 runs SCAR improves Macro-F1 by +3.6 to +9.7 pp, cuts cross-run
+variance by 49.8%, and adds only ~0.1% parameters and ~2% inference overhead.
+
+---
 
 ## Setup
 
 ```bash
+git clone https://github.com/qinglushengliangye/SCAR.git && cd SCAR
 pip install -r requirements.txt
-# DeBERTa-v3-large backbone + a GLiREL-style pretrained checkpoint are loaded via
-# the paths in each config (model_name / prev_path); set them to your local paths.
 ```
 
-## Data
+Datasets are already preprocessed and included:
 
-`data/wiki_zsl_all.jsonl` and `data/few_rel_all.jsonl` are the preprocessed,
-span-level datasets used in all experiments (each line is one sentence with entity
-spans and relation annotations). Preprocessing scripts: `data/process_wiki_zsl.py`,
-`data/process_few_rel.py`.
+| File | Content |
+| --- | --- |
+| `data/wiki_zsl_all.jsonl` | Wiki-ZSL, 93,399 sentences, 113 relation types |
+| `data/few_rel_all.jsonl` | FewRel, 56,000 sentences, 80 relation types |
 
-## Reproducing the experiments
+Configs point at a local DeBERTa-v3-large checkpoint via `model_name` /
+`prev_path` / `root_dir`; edit those paths for your environment before running.
 
-The top-level configs (`configs/config_{wiki_zsl,few_rel}_{repro,cascade,innovation2}.yaml`
-= Baseline / CCA / SCAR, and the `config_ablation_*` files) are **generic templates
-with no fixed `seed`**: each run draws a fresh random relation split. To reproduce a
-specific split, add `seed: <int>` to the config. Splitting is deterministic per seed
-(`get_unique_relations` sorts before shuffling), so a given seed reproduces the same
-train/dev/test partition and pairs the three methods on that split. The exact rebuttal
-runs use pinned seeds in `configs/e1_devsplit/` and `configs/e2_controlled_lr/`
-(exp1/2/3 -> seed 1/2/3).
+---
 
-Single run (Protocol A, standard):
+## Reproducing the paper
+
+### Protocol A — standard ZSRE (main results table)
+
+The protocol of Chen and Li (2021), shared by every compared method: the
+held-out relation split serves as both dev and test set, and the best
+**Macro-F1** checkpoint over the threshold grid is saved.
 
 ```bash
-# exact main-table reproduction (unmodified script):
-python3 train_original.py --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar_wikizsl
-# equivalent via the dual-protocol script (num_dev_rel_types absent => Protocol A):
-python3 train.py          --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar_wikizsl
+python3 train.py --config configs/config_wiki_zsl_repro.yaml       --log_dir logs/baseline   # Baseline
+python3 train.py --config configs/config_wiki_zsl_cascade.yaml     --log_dir logs/cca       # CCA
+python3 train.py --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar      # SCAR
 ```
 
-- **Baseline** = `*_repro*` configs, **CCA** = `*_cascade*`, **SCAR** = `*_innovation2*`.
-- Threshold search + checkpoint selection use Macro-F1 (`threshold_search_metric`).
+Swap in `config_few_rel_*.yaml` for FewRel. Each number in the main table is the
+mean over five independent random relation splits.
 
-### E1 — independent dev-split (leakage-free selection)
+### Protocol B — leakage-free three-way split
 
-Three-way, relation-disjoint split (`num_dev_rel_types`): threshold + checkpoint
-are selected on an independent **dev** relation set; the **test** relations are
-scored once at the dev-selected threshold and never used for selection
-(`<log_dir>/dev_test_results.json`).
+Train / dev / test relation sets are mutually disjoint (83 / 15 / 15 relations).
+Threshold **and** checkpoint are selected on dev only; the test relations are
+scored exactly once at the dev-selected threshold and never influence selection.
+Results are written to `<log_dir>/dev_test_results.json`.
 
 ```bash
-bash scripts/launch_e1_devsplit.sh "0 1 2 3 4"   # GPU ids
-python3 scripts/collect_e1_results.py            # paired table + per-split deltas + paired t-test
+bash scripts/launch_e1_devsplit.sh "0 1 2 3 4"   # GPU ids; runs train_leakage_free.py
+python3 scripts/collect_e1_results.py            # paired table, per-split deltas, paired t-test
+python3 analysis/e1_oracle_threshold.py          # dev-selected vs. test-oracle threshold
 ```
 
-### E2 — controlled learning-rate
+### Controlled learning rate
+
+Each configuration run at the other's learning rate, to rule out a
+hyperparameter confound.
 
 ```bash
 bash scripts/launch_e2_controlled_lr.sh "0 1 2 3 4"
 ```
 
-### E3 — calibration diagnostics (no GPU)
+### Ablations
 
 ```bash
-python3 analysis/compute_calibration.py          # ECE / Brier / NLL from cached full-vocabulary scores
+bash scripts/run_ablation_cca_no_zscore.sh
+bash scripts/run_ablation_cca_no_grad_iso.sh
+bash scripts/run_ablation_iscl_no_cross_attn.sh
+bash scripts/run_ablation_iscl_no_global_align.sh
+bash scripts/run_ablation_iscl_no_supcon_warmup.sh
 ```
 
-### Multi-GPU scheduler (E1 + E2, resilient)
+### Multi-GPU scheduler
+
+One job per GPU, auto-retry, skips runs that already produced `_SUCCESS`.
 
 ```bash
-python3 scripts/run_rebuttal_queue.py 0 1 2 3 4  # 1 job/GPU, auto-retry, skips completed (_SUCCESS)
+python3 scripts/run_rebuttal_queue.py 0 1 2 3 4
 ```
+
+### Analysis and figures (no GPU required)
+
+These read the cached full-vocabulary statistics in `analysis/cached/`, so every
+number and figure in the paper can be regenerated without re-running inference.
+
+```bash
+python3 analysis/compute_calibration.py    # Table 4: ECE / Brier / NLL
+python3 analysis/gen_failure_analysis.py   # Section 4.6: when and why SCAR regresses
+python3 analysis/gen_per_rel_table.py      # Table 11: full 113-relation breakdown
+python3 analysis/gen_threshold_curve.py    # threshold-vs-F1 sensitivity figure
+python3 analysis/gen_per_rel_delta.py      # per-relation Delta-recall figure
+```
+
+---
+
+## Repository layout
+
+```
+glirel/                          model and modules (CCA, ISCL, evaluator, ...)
+train.py                         PROTOCOL A entry point (standard ZSRE)
+train_leakage_free.py            PROTOCOL B entry point (three-way disjoint split)
+eval.py, infer_and_eval.py       evaluation and inference helpers
+configs/                         main experiment + ablation configs
+configs/e1_devsplit/             PROTOCOL B configs
+configs/e2_controlled_lr/        controlled learning-rate configs
+scripts/                         config generators, multi-GPU launchers, collectors
+analysis/                        diagnostics that produce the paper's tables/figures
+analysis/cached/                 cached full-vocabulary statistics + relation centroids
+data/                            preprocessed Wiki-ZSL and FewRel
+```
+
+---
 
 ## Notes
 
-- Configs use absolute paths (`model_name`, `prev_path`, `root_dir`) reflecting the
-  original run environment; adjust them to your setup.
 - ISCL is training-only and removed at inference; only CCA's additive fusion
-  persists (~0.1% params, ~2% throughput overhead).
-- This work builds on the public GLiREL joint-encoding framework (cited in the paper).
+  persists (~0.1% parameters, ~2% throughput overhead).
+- Checkpoint selection and threshold search both use **Macro-F1**
+  (`threshold_search_metric`), matching the metric reported in the paper.
+- This work builds on the public GLiREL joint-encoding framework, cited in the
+  paper.
 
 ## Citation
 

@@ -32,7 +32,7 @@ for m in "${METHODS[@]}"; do
     log_dir="/root/autodl-tmp/logs-e1/${m}_wikizsl/${e}"
     mkdir -p "$log_dir"
     echo "[E1] launching $m $e on GPU $gpu -> $log_dir"
-    CUDA_VISIBLE_DEVICES="$gpu" python3 train.py \
+    CUDA_VISIBLE_DEVICES="$gpu" python3 train_leakage_free.py \
       --config "$cfg" \
       --log_dir "$log_dir" \
       >"$log_dir/train.log" 2>&1 &
