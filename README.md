@@ -1,9 +1,10 @@
 # SCAR: Stabilized Cascade and Alignment for Robust Joint-Encoding ZSRE
 
-Anonymized code and data for the submission *"Distributional Recalibration for
-Zero-Shot Relation Extraction"*. SCAR augments a joint-encoding ZSRE baseline
-(GLiREL-style, DeBERTa-v3-large) with two lightweight, stabilized auxiliary
-branches:
+Code and data for *"Distributional Stabilization for Zero-Shot Relation
+Extraction"*, to appear at **EMNLP 2026 (Main Conference)**.
+
+SCAR augments a joint-encoding ZSRE baseline (GLiREL-style, DeBERTa-v3-large)
+with two lightweight, stabilized auxiliary branches:
 
 - **CCA (Coarse-to-Fine Cascade Augmentation)** — a gradient-isolated dual-encoder
   scoring stream with per-sample Z-score normalization, added to the fine-grained
@@ -23,6 +24,9 @@ configs/e1_devsplit/            PROTOCOL B: independent dev-split configs
 configs/e2_controlled_lr/       controlled learning-rate configs
 scripts/                        config generators + multi-GPU launchers + collectors
 analysis/compute_calibration.py ECE / Brier / NLL diagnostics
+analysis/e1_oracle_threshold.py dev-selected vs. test-oracle threshold check
+analysis/gen_per_rel_table.py   full 113-relation recall breakdown (appendix table)
+analysis/gen_failure_analysis.py  when/why SCAR regresses (type-signature families)
 data/wiki_zsl_all.jsonl         preprocessed Wiki-ZSL (113 relation types)
 data/few_rel_all.jsonl          preprocessed FewRel (80 relation types)
 ```
@@ -128,3 +132,20 @@ python3 scripts/run_rebuttal_queue.py 0 1 2 3 4  # 1 job/GPU, auto-retry, skips 
 - ISCL is training-only and removed at inference; only CCA's additive fusion
   persists (~0.1% params, ~2% throughput overhead).
 - This work builds on the public GLiREL joint-encoding framework (cited in the paper).
+
+## Citation
+
+```bibtex
+@inproceedings{liu2026scar,
+  title     = {Distributional Stabilization for Zero-Shot Relation Extraction},
+  author    = {Liu, Yongxin and Zhang, Huaping and Li, Qiuchi and Li, Lei and
+               Gao, Chunxiao and Lv, Haocheng and Yan, Ruohao and Zhang, Baohua},
+  booktitle = {Proceedings of the 2026 Conference on Empirical Methods in
+               Natural Language Processing (EMNLP)},
+  year      = {2026}
+}
+```
+
+## License
+
+Apache-2.0, following the upstream GLiREL framework.

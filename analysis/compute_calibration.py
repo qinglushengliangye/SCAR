@@ -18,7 +18,9 @@ import os
 
 import numpy as np
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "..", "paper", "figures")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CACHED = os.path.join(_HERE, "cached")
+FIG_DIR = _CACHED if os.path.isdir(_CACHED) else os.path.join(_HERE, "..", "paper", "figures")
 METHODS = {
     "Baseline": "stats_baseline.json",
     "CCA": "stats_cca.json",
