@@ -82,14 +82,30 @@ The protocol of Chen and Li (2021), shared by every compared method: the
 held-out relation split serves as both dev and test set, and the best
 **Macro-F1** checkpoint over the threshold grid is saved.
 
+Each number in the main table is the mean over **five** independent random
+relation splits, so each method has five configs. On Wiki-ZSL:
+
 ```bash
-python3 train.py --config configs/config_wiki_zsl_repro.yaml       --log_dir logs/baseline   # Baseline
-python3 train.py --config configs/config_wiki_zsl_cascade.yaml     --log_dir logs/cca       # CCA
-python3 train.py --config configs/config_wiki_zsl_innovation2.yaml --log_dir logs/scar      # SCAR
+# Baseline  (split 1 is the base config, splits 2-5 are the _exp files)
+for c in config_wiki_zsl_repro config_wiki_zsl_repro_exp{2,3,4,5}; do
+  python3 train.py --config configs/$c.yaml --log_dir logs/baseline/$c
+done
+
+# CCA  (all five splits are _exp files; the base config is an earlier
+#       tuning variant with alpha_max=0.15 and does NOT reproduce the paper)
+for c in config_wiki_zsl_cascade_exp{1,2,3,4,5}; do
+  python3 train.py --config configs/$c.yaml --log_dir logs/cca/$c
+done
+
+# SCAR  (split 1 is the base config, splits 2-5 are the _split files)
+for c in config_wiki_zsl_innovation2 config_wiki_zsl_innovation2_split{2,3,4,5,6}; do
+  python3 train.py --config configs/$c.yaml --log_dir logs/scar/$c
+done
 ```
 
-Swap in `config_few_rel_*.yaml` for FewRel. Each number in the main table is the
-mean over five independent random relation splits.
+FewRel uses `config_few_rel_repro{,_exp2..5}`, `config_few_rel_cascade_exp1..5`
+and `config_few_rel_innovation2_exp1..5`. The hyperparameters of these configs are
+the ones reported in the paper's hyperparameter table.
 
 ### Protocol B — leakage-free three-way split
 
