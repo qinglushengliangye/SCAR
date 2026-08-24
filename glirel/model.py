@@ -112,10 +112,10 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
         # scoring layer
         self.scorer = ScorerLayer(config.scorer, hidden_size=config.hidden_size, dropout=config.dropout)
 
-        # ── 创新点1：粗细粒度软融合增强推理架构 ─────────────────────────────
-        # DualEncoderAugmentor：轻量双编码器计算粗粒度偏置，
-        # 通过软融合（fine_score + alpha * coarse_score）增强细粒度得分，
-        # 不做任何硬剪枝，保持召回率，提升精确度和整体 F1
+        # ── CCA: coarse-to-fine cascade augmentation ────────────────────────
+        # DualEncoderAugmentor computes a lightweight coarse bias and adds it
+        # to the fine-grained scores (fine_score + alpha * coarse_score). The
+        # fusion is additive, never a hard Top-K prune, so recall is preserved.
         if getattr(config, 'cascade_retrieval', False):
             retrieval_dim          = getattr(config, 'retrieval_dim', 256)
             fusion_alpha_init      = getattr(config, 'fusion_alpha_init', 0.0)
@@ -142,11 +142,12 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
             )
         # ─────────────────────────────────────────────────────────────────
 
-        # ── 创新点2：交互式特征提取 + 有监督对比学习 ────────────────────────
-        # SupervisedContrastiveModule：
-        #   - Label-Aware Cross-Attention 让实体对表示与标签集合做交互
-        #   - 投影头映射到对比空间
-        #   - 带难负样本加权的 SupCon 损失，推远语义相似但类别不同的样本对
+        # ── ISCL: interactive supervised contrastive learning ───────────────
+        # SupervisedContrastiveModule combines:
+        #   - label-aware cross-attention between pairs and the label set
+        #   - a projection head into the contrastive space
+        #   - a SupCon loss with hard-negative weighting, which separates
+        #     semantically close pairs that carry different labels
         if getattr(config, 'supcon_enabled', False):
             self.supcon_module = SupervisedContrastiveModule(
                 hidden_size=config.hidden_size,
@@ -313,11 +314,11 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
             coref_scores = None
         #######################################################
 
-        # ── 创新点1：粗细粒度软融合增强推理 ──────────────────────────────────
-        # 先计算细粒度得分（完整保留，与原模型完全一致）
+        # ── CCA: coarse-to-fine soft fusion ─────────────────────────────────
+        # The fine-grained scores are computed exactly as in the base model.
         scores = self.scorer(rel_rep, rel_type_rep)  # [B, num_pairs, num_classes]
 
-        retrieval_loss = scores.sum() * 0.0  # 零张量，保持计算图
+        retrieval_loss = scores.sum() * 0.0  # zero tensor, keeps the graph
         if hasattr(self, 'dual_encoder_retriever'):
             _rel_labels = x.get('rel_label', None) if isinstance(x, dict) else None
 
@@ -328,28 +329,28 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
                 rel_type_mask=rel_type_mask,
                 rel_labels=_rel_labels,
             )
-            aug_scores     = aug_out['augmented_scores']   # [B, P, L] 软融合后得分
-            retrieval_loss = aug_out['retrieval_loss']     # 辅助对比损失
+            aug_scores     = aug_out['augmented_scores']   # [B, P, L] fused scores
+            retrieval_loss = aug_out['retrieval_loss']     # auxiliary contrastive loss
 
-            # ── 异常检测：若粗分支导致 augmented_scores 异常，回退到 fine_scores ──
-            # 判断标准：augmented_scores 的有效值标准差超过 fine_scores 的 3 倍
+            # Fall back to fine_scores if the coarse branch destabilises the
+            # fused scores, i.e. their std exceeds 3x that of fine_scores.
             with torch.no_grad():
                 fine_std = scores[rel_type_mask.unsqueeze(1).expand_as(scores)].std() + 1e-6
                 aug_std  = aug_out['augmented_scores'][rel_type_mask.unsqueeze(1).expand_as(scores)].std() + 1e-6
                 is_abnormal = (aug_std / fine_std) > 3.0 or torch.isnan(aug_out['augmented_scores']).any() or torch.isinf(aug_out['augmented_scores']).any()
 
             if is_abnormal:
-                # 回退：仅保留辅助损失，得分不融合
+                # Keep only the auxiliary loss; do not fuse the scores.
                 if self.training:
                     logger.warning(
                         f"[CascadeAugment] step={self.dual_encoder_retriever._step.item()} "
                         f"coarse branch abnormal (aug_std/fine_std={aug_std/fine_std:.2f}), fallback to fine_scores"
                     )
-                # scores 保持为原始 fine_scores
+                # scores stays at the original fine_scores
             else:
                 scores = aug_scores
 
-            # 训练日志（每500步打印一次融合权重）
+            # Log the fusion weight every 500 steps.
             if self.training:
                 step_val = self.dual_encoder_retriever._step.item()
                 if step_val % 500 == 1:
@@ -360,11 +361,11 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
                     )
         # ─────────────────────────────────────────────────────────────────
 
-        # ── 创新点2：交互式特征提取 + 有监督对比学习 ────────────────────────
-        # 计算 supcon 损失（仅训练时生效，eval 返回零张量）。
-        # 注意：rel_rep 与 rel_type_rep 梯度不截断，使对比信号回流到主干，
-        # 显式优化特征分布结构，拉近同类对、推远难负样本对。
-        supcon_loss = scores.sum() * 0.0  # 零张量，保持计算图
+        # ── ISCL: interactive supervised contrastive learning ───────────────
+        # Training-only; returns a zero tensor at eval. Note that rel_rep and
+        # rel_type_rep are NOT detached here, so the contrastive signal reaches
+        # the backbone and reshapes the representation geometry directly.
+        supcon_loss = scores.sum() * 0.0  # zero tensor, keeps the graph
         if hasattr(self, 'supcon_module'):
             _rel_labels_sup = x.get('rel_label', None) if isinstance(x, dict) else None
             _class_to_ids = x.get('classes_to_id', None) if isinstance(x, dict) else None
@@ -453,12 +454,12 @@ class GLiREL(InstructBase, PyTorchModelHubMixin):
         rel_loss = all_losses.sum()
         total_loss = rel_loss
 
-        # ── 创新点1：加入检索辅助损失 ────────────────────────────────────
+        # ── CCA: add the auxiliary retrieval loss ───────────────────────────
         if hasattr(self, 'dual_encoder_retriever') and retrieval_loss is not None:
             total_loss = total_loss + retrieval_loss
         # ─────────────────────────────────────────────────────────────────
 
-        # ── 创新点2：加入有监督对比学习损失 ─────────────────────────────
+        # ── ISCL: add the supervised contrastive loss ───────────────────────
         if hasattr(self, 'supcon_module') and supcon_loss is not None:
             total_loss = total_loss + supcon_loss
         # ─────────────────────────────────────────────────────────────────
