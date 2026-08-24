@@ -1,33 +1,28 @@
-"""
-创新点2：交互式特征提取 + 有监督对比学习 (Supervised Contrastive Learning, SupCon)
-===================================================================================
+"""Interactive Supervised Contrastive Learning (ISCL).
 
-【核心思想】
-针对零样本场景下模型难以区分细粒度相似关系（如"创始人"与"联合创始人"）的难题，
-本模块在特征投影空间中：
-  - 极力拉近同类关系样本的距离
-  - 推远语义高度相似但类别不同的"难负样本"对
+Joint-encoding ZSRE struggles to separate fine-grained relations that share
+an entity-type signature (e.g. *founder* vs. *co-founder*). This module
+reshapes the projection space so that same-relation pairs are pulled together
+and semantically close but differently-labelled "hard negatives" are pushed
+apart. Unlike the primary BCE loss, which only constrains the decision
+boundary, this explicitly constrains the global geometry of the space.
 
-不同于传统分类损失仅关注决策边界，本模块显式优化特征分布结构，迫使模型学到
-更本质的语义差异，提升零样本场景下的泛化与抗干扰能力。
+Three components adapt supervised contrastive learning to joint encoding:
 
-【与原始设计的适配】
-原描述只谈"特征投影 + 拉近/推远"，未利用 GLiREL 的交互式编码能力，
-也未定义"难负样本"。本实现做了三处修正：
+1. A label-aware cross-attention layer lets each entity-pair representation
+   attend over all candidate label representations in the batch, producing a
+   label-conditioned contrastive representation.
+2. Hard negatives are the negatives whose label embeddings are most similar
+   to the anchor's; they are up-weighted in the SupCon denominator by
+   w = 1 + beta * max(0, cos).
+3. A linear curriculum warmup ramps the loss weight from 0 to
+   loss_weight_max, so the contrastive term cannot disrupt the pretrained
+   entity-pair representations early in training.
 
-1. 加入 Label-Aware Cross-Attention 层：让实体对表示与当前 batch 所有标签
-   表示做一次交互，得到"标签感知"的对比表示，对应"交互式特征提取"。
-2. 难负样本定义为 batch 内标签文本余弦相似度较高的负标签样本，通过在
-   SupCon 分母中对此类负样本做乘性加权（w = 1 + β·max(0, cos)）显式放大
-   其竞争压力。
-3. 用线性 warmup 让对比损失在 warmup_steps 内从 0 增长到 loss_weight_max，
-   避免训练早期破坏预训练 rel_rep 结构。
-
-【数值稳定性】
-- 投影表示 L2 归一化后用温度缩放（τ=0.1）
-- logits 在 softmax 前做 clamp（±50）防止 AMP fp16 溢出
-- 若 batch 内无有效正样本对，返回零损失但保留计算图
-- NaN/Inf 检测：异常时退化为零损失，不干扰主任务
+Numerical safeguards: projections are L2-normalised and temperature-scaled;
+logits are clamped to +-50 before the softmax to avoid fp16 overflow under
+AMP; if a batch contains no valid positive pair, or if the loss becomes
+non-finite, a zero loss is returned with the graph kept intact.
 """
 
 from typing import List, Dict, Optional
@@ -40,13 +35,11 @@ from loguru import logger
 
 
 class LabelAwareCrossAttention(nn.Module):
-    """
-    轻量单头 Cross-Attention：
-        Q = rel_rep  [B, P, D]
-        K,V = rel_type_rep  [B, L, D]
-    输出：标签感知的实体对表示 [B, P, D]（residual + LayerNorm）
+    """Lightweight single-head cross-attention.
 
-    参数量约 3·D² + D ≈ 1.77M（D=768）
+    Q = rel_rep [B, P, D]; K, V = rel_type_rep [B, L, D]. Returns
+    label-aware entity-pair representations [B, P, D] with a residual
+    connection and LayerNorm. About 3*D^2 + D ~= 1.77M parameters at D=768.
     """
 
     def __init__(self, hidden_size: int, dropout: float = 0.1):
@@ -78,7 +71,7 @@ class LabelAwareCrossAttention(nn.Module):
 
         attn_logits = attn_logits.clamp(min=-50.0, max=50.0)
         attn = F.softmax(attn_logits, dim=-1)
-        attn = torch.nan_to_num(attn, nan=0.0)  # 若整行被 mask，softmax 会产生 NaN
+        attn = torch.nan_to_num(attn, nan=0.0)  # a fully masked row yields NaN
         attn = self.dropout(attn)
 
         ctx = torch.einsum('BPL,BLD->BPD', attn, v)  # [B, P, D]
@@ -88,10 +81,10 @@ class LabelAwareCrossAttention(nn.Module):
 
 
 class ProjectionHead(nn.Module):
-    """
-    对比空间投影头：
-        Linear(D, 2d_c) -> LayerNorm -> GELU -> Dropout -> Linear(2d_c, d_c)
-    输出 L2 归一化。参数量 ≈ D·2d_c + 2d_c·d_c ≈ 230K。
+    """Projection head into the contrastive space.
+
+    Linear(D, 2d_c) -> LayerNorm -> GELU -> Dropout -> Linear(2d_c, d_c),
+    followed by L2 normalisation. About D*2d_c + 2d_c*d_c ~= 230K parameters.
     """
 
     def __init__(self, hidden_size: int, proj_dim: int = 128, dropout: float = 0.1):
@@ -110,23 +103,17 @@ class ProjectionHead(nn.Module):
 
 
 class SupervisedContrastiveModule(nn.Module):
-    """
-    有监督对比学习模块（含难负加权与 warmup）
+    """Supervised contrastive loss with hard-negative weighting and warmup.
 
-    输入：
-      rel_rep          [B, P, D]    实体对表示（含 mask padding 位置）
-      rel_type_rep     [B, L, D]    标签文本表示
-      rel_type_mask    [B, L]       有效标签 mask
-      rel_labels       [B, P]       标签 id（1-indexed，0 为无关系，-1 为 padding）
-      class_to_ids     List[Dict]   batch 内每个样本的 {rel_text: local_id} 映射
+    Args:
+      rel_rep       [B, P, D]  entity-pair representations (padded positions included)
+      rel_type_rep  [B, L, D]  label representations
+      rel_type_mask [B, L]     mask over valid labels
+      rel_labels    [B, P]     label ids (1-indexed; 0 = no relation, -1 = padding)
+      class_to_ids  List[Dict] per-sample {rel_text: local_id} mapping
 
-    输出：
-      {
-        'supcon_loss': scalar (已乘以当前 warmup 权重)
-        'raw_loss'   : scalar (未乘权重，调试用)
-        'loss_weight': float
-        'n_anchors'  : int
-      }
+    Returns a dict with the warmup-scaled loss, the unscaled loss (for
+    logging), the current loss weight, and the number of anchors.
     """
 
     def __init__(
@@ -159,7 +146,7 @@ class SupervisedContrastiveModule(nn.Module):
 
     @property
     def loss_weight(self) -> float:
-        """warmup: 0 → loss_weight_max 线性增长；达到 warmup_steps 后稳定"""
+        """Linear warmup from 0 to loss_weight_max, then held constant."""
         if self.warmup_steps <= 0:
             return self.loss_weight_max
         progress = min(1.0, self._step.item() / max(1, self.warmup_steps))
@@ -169,11 +156,14 @@ class SupervisedContrastiveModule(nn.Module):
     def _build_global_label_ids(
         class_to_ids_batch: List[Dict[str, int]],
     ):
-        """
-        将每个样本的本地标签 id 映射为跨 batch 统一的全局 id。
-        返回：
-          global_id_per_local : List[List[int]]  每个 batch 样本的 [L_i] 全局 id（按 local id 升序）
-          num_global          : int              全局唯一标签数
+        """Map each sample's local label ids to batch-global ids.
+
+        This is what makes anchors of the same relation in different samples
+        of the batch count as positives.
+
+        Returns:
+          global_id_per_local: per sample, the [L_i] global ids ordered by local id
+          num_global         : number of distinct labels in the batch
         """
         text_to_global: Dict[str, int] = {}
         global_id_per_local: List[List[int]] = []
@@ -181,16 +171,17 @@ class SupervisedContrastiveModule(nn.Module):
             if mapping is None:
                 global_id_per_local.append([])
                 continue
-            # 按 local id 升序排序，抵消 coref 特殊索引 (local 可能为 -50)
-            # 只保留 local > 0 的正常标签（与 rel_labels>0 对齐）
+            # Sort by ascending local id and keep only local > 0, which
+            # drops the special coref indices (local can be -50) and matches
+            # the rel_labels > 0 convention.
             sorted_items = sorted(
                 [(v, k) for k, v in mapping.items() if v > 0],
                 key=lambda x: x[0],
             )
             labels_for_this = []
-            # local_id 从 1 开始递增且连续；我们按位置填充
+            # local_id is 1-based and contiguous, so fill positionally.
             max_local = sorted_items[-1][0] if sorted_items else 0
-            # 用 list 占位 max_local 个位置（index = local_id - 1）
+            # Reserve max_local slots (index = local_id - 1).
             placeholder = [-1] * max_local
             for local_id, text in sorted_items:
                 if text not in text_to_global:
@@ -204,13 +195,13 @@ class SupervisedContrastiveModule(nn.Module):
         rel_rep: Tensor,                      # [B, P, D]
         rel_type_rep: Tensor,                 # [B, L, D]
         rel_type_mask: Tensor,                # [B, L]
-        rel_labels: Optional[Tensor],         # [B, P]  1-indexed，0/-1 非正样本
+        rel_labels: Optional[Tensor],         # [B, P]  1-indexed; 0/-1 are not positives
         class_to_ids_batch: Optional[List[Dict[str, int]]] = None,
     ) -> dict:
         device = rel_rep.device
-        zero = rel_rep.sum() * 0.0  # 保持计算图
+        zero = rel_rep.sum() * 0.0  # keeps the graph connected
 
-        # 训练才推进 step 与计算损失（eval 时返回 0）
+        # Only step and compute the loss during training; return 0 at eval.
         if not self.training or rel_labels is None:
             return {
                 'supcon_loss': zero,
@@ -224,22 +215,22 @@ class SupervisedContrastiveModule(nn.Module):
         B, P, D = rel_rep.shape
         L = rel_type_rep.shape[1]
 
-        # 1) 交互式特征：让实体对表示感知当前 batch 的标签集合
+        # 1) Interactive features: attend over the batch's label set.
         if self.cross_attention:
             interacted = self.cross_attn(rel_rep, rel_type_rep, rel_type_mask)  # [B, P, D]
         else:
             interacted = rel_rep
 
-        # 2) 投影到对比空间
+        # 2) Project into the contrastive space.
         z_pair = self.pair_proj(interacted)                                 # [B, P, d_c]
         z_label = self.label_proj(rel_type_rep)                             # [B, L, d_c]
 
-        # 3) 收集 anchor：仅 rel_labels ∈ [1, L] 的位置为有效正标签样本
-        #    同时排除 padding (-1) 与负样本对 (0)
+        # 3) Anchors are positions with rel_labels in [1, L]; padding (-1)
+        #    and negative pairs (0) are excluded.
         valid_anchor_mask = (rel_labels > 0) & (rel_labels <= L)            # [B, P]
         n_anchors = int(valid_anchor_mask.sum().item())
         if n_anchors < 2:
-            # 无法构造正样本对
+            # Cannot form a positive pair.
             return {
                 'supcon_loss': zero,
                 'raw_loss'   : zero,
@@ -247,15 +238,15 @@ class SupervisedContrastiveModule(nn.Module):
                 'n_anchors'  : n_anchors,
             }
 
-        # 4) 将 batch 内标签映射为全局 id，用于跨样本识别同类正样本
+        # 4) Map labels to batch-global ids to find positives across samples.
         if not self.global_alignment or class_to_ids_batch is None:
             global_ids_per_sample = [list(range(1, L + 1)) for _ in range(B)]
             num_global = L
         else:
             global_ids_per_sample, num_global = self._build_global_label_ids(class_to_ids_batch)
 
-        # 5) 为每个 anchor 收集全局标签 id（用于正负样本划分）
-        #    并收集 anchor 对应的标签嵌入（用于难负加权）
+        # 5) For each anchor collect its global label id (to split positives
+        #    from negatives) and its label embedding (for hard-negative weighting).
         anchor_pair_indices = []   # flat idx in [B*P]
         anchor_global_ids = []
         anchor_local_ids = []
@@ -296,20 +287,20 @@ class SupervisedContrastiveModule(nn.Module):
                 'n_anchors'  : N,
             }
 
-        # 6) 抽取 anchor 投影向量
+        # 6) Gather the anchor projection vectors.
         z_flat = z_pair.reshape(B * P, self.proj_dim)       # [B*P, d_c]
         z_anchors = z_flat[anchor_idx_tensor]               # [N, d_c]
 
-        # 7) 抽取 anchor 对应的"当前样本所属标签"嵌入（用于难负加权）
-        #    从各自样本的 z_label 中取第 (local_id-1) 行
+        # 7) Gather each anchor's own label embedding, taking row
+        #    (local_id - 1) from that sample's z_label.
         z_label_anchor = z_label[anchor_batch_tensor, anchor_local_tensor]  # [N, d_c]
 
-        # 8) 计算 anchor-anchor 相似度矩阵（对比核心）
+        # 8) Anchor-anchor similarity matrix.
         sim = torch.matmul(z_anchors, z_anchors.t())        # [N, N]
         sim = sim / self.temperature
         sim = sim.clamp(min=-50.0, max=50.0)
 
-        # 9) 构造 positive mask（同全局 id，但不含自身）
+        # 9) Positive mask: same global id, excluding the anchor itself.
         pos_mask = anchor_global_tensor.unsqueeze(0).eq(anchor_global_tensor.unsqueeze(1))  # [N,N]
         self_mask = torch.eye(N, device=device, dtype=torch.bool)
         pos_mask = pos_mask & (~self_mask)
@@ -323,40 +314,40 @@ class SupervisedContrastiveModule(nn.Module):
                 'n_anchors'  : int(N),
             }
 
-        # 10) 难负样本加权：neg_mask = (!pos_mask & !self_mask)；对 neg 计算
-        #     anchor 标签嵌入的余弦相似度，越相似越"难"
+        # 10) Hard-negative weighting: for each negative, the cosine
+        #     similarity between anchor label embeddings measures hardness.
         neg_mask = (~pos_mask) & (~self_mask)               # [N, N]
 
-        # 标签语义相似度（在对比空间中 L2 归一化向量的点积即 cos）
+        # Label similarity; the vectors are L2-normalised, so the dot product is cosine.
         label_sim = torch.matmul(z_label_anchor, z_label_anchor.t())  # [N, N]
         label_sim = label_sim.clamp(min=-1.0, max=1.0)
         hard_weight = 1.0 + self.hard_neg_beta * label_sim.clamp(min=0.0)  # [N, N] ≥ 1
 
-        # logits 减去每行最大值（数值稳定性）
+        # Subtract the row max for numerical stability.
         sim_max, _ = sim.max(dim=1, keepdim=True)
         sim_stable = sim - sim_max.detach()
         exp_sim = torch.exp(sim_stable)
 
-        # 对 negative 乘加权；positive 和 self 不加权
+        # Weight negatives only; positives and the self term are unweighted.
         weights = torch.ones_like(exp_sim)
         weights = torch.where(neg_mask, hard_weight, weights)
 
-        # 分母：所有非自身项（positive + negative）加权后求和
+        # Denominator: weighted sum over all non-self terms.
         valid_mask = ~self_mask                              # [N, N]
         denom = (exp_sim * weights * valid_mask.float()).sum(dim=1) + 1e-8  # [N]
 
-        # 分子：每个 anchor 对其所有 positive 的 log prob 求均值
+        # Numerator: mean log-probability over each anchor's positives.
         log_prob = sim_stable - torch.log(denom).unsqueeze(1)  # [N, N]
         pos_count = pos_mask.float().sum(dim=1).clamp(min=1.0) # [N]
         mean_log_prob_pos = (log_prob * pos_mask.float()).sum(dim=1) / pos_count  # [N]
 
-        # 仅对含 positive 的 anchor 取损失（其余为 0，不参与平均）
+        # Only anchors that have a positive contribute to the mean.
         loss_per_anchor = -mean_log_prob_pos                 # [N]
         loss_per_anchor = torch.where(has_pos, loss_per_anchor, torch.zeros_like(loss_per_anchor))
         n_valid = has_pos.float().sum().clamp(min=1.0)
         raw_loss = loss_per_anchor.sum() / n_valid
 
-        # 异常检测：NaN/Inf 时退化为零损失
+        # Fall back to a zero loss if the result is non-finite.
         if torch.isnan(raw_loss) or torch.isinf(raw_loss):
             logger.warning(
                 f"[SupCon] step={self._step.item()} raw_loss NaN/Inf, fallback to zero"
@@ -366,7 +357,7 @@ class SupervisedContrastiveModule(nn.Module):
         lw = self.loss_weight
         supcon_loss = lw * raw_loss
 
-        # 周期性日志
+        # Periodic logging.
         if self.training and (self._step.item() % 500 == 1):
             logger.info(
                 f"[SupCon] step={self._step.item()} "
