@@ -9,8 +9,8 @@ Extraction"**, EMNLP 2026 (Main Conference).
 
 Joint-encoding zero-shot relation extraction (ZSRE) scores every candidate
 relation label in a single Transformer forward pass, which makes it both
-accurate and fast (156–176 sent/s, versus 1.4–27.8 for a representative
-pairwise method). Its robustness, however, has only ever been tested on the
+accurate and fast (254–300 sent/s at m=10 in our reproduction, versus the
+1.4–27.8 reported for a representative pairwise method on other hardware). Its robustness, however, has only ever been tested on the
 standard protocol, which shows the model just 5–15 candidate relations at a
 time.
 
@@ -50,8 +50,9 @@ stabilized with gradient isolation, Z-score normalization and curriculum warmup.
 | Best-threshold Macro-F1 (full vocab) | 18.2 | 18.2 | **42.9** |
 | Leakage-free split, test Macro-F1 | 53.5 | 64.0 | **64.5** |
 
-Across 30 runs SCAR improves Macro-F1 by +3.6 to +9.7 pp, cuts cross-run
-variance by 49.8%, and adds only ~0.1% parameters and ~2% inference overhead.
+Across 30 runs SCAR improves Macro-F1 by +3.6 to +9.7 pp, cuts the cross-run
+standard deviation by 49.8%, and adds only ~0.1% parameters and ~5% inference
+overhead.
 
 ---
 
@@ -155,7 +156,7 @@ number and figure in the paper can be regenerated without re-running inference.
 ```bash
 python3 analysis/compute_calibration.py    # Table 4: ECE / Brier / NLL
 python3 analysis/gen_failure_analysis.py   # Section 4.6: when and why SCAR regresses
-python3 analysis/gen_per_rel_table.py      # Table 11: full 113-relation breakdown
+python3 analysis/gen_per_rel_table.py      # Table 10: full 113-relation breakdown
 python3 analysis/gen_threshold_curve.py    # threshold-vs-F1 sensitivity figure
 python3 analysis/gen_per_rel_delta.py      # per-relation Delta-recall figure
 ```
